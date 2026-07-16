@@ -1,0 +1,19 @@
+{
+  "name": "pi-codex-usage",
+  "version": "0.1.0",
+  "description": "Show ChatGPT-backed Codex usage windows in Pi.",
+  "type": "module",
+  "license": "CC-BY-4.0",
+  "keywords": ["pi-package", "pi", "codex", "usage", "quota"],
+  "pi": {
+    "extensions": ["./pi-codex-usage.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.4"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  }
+}
