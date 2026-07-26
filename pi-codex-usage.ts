@@ -159,25 +159,22 @@ function compactWindow(window: UsageWindow): string {
 	return `${windowName(window.limit_window_seconds)}${used}%`;
 }
 
-function publishFooterStatus(ctx: ExtensionContext, usage: UsageResponse, stale = false): void {
-	if (ctx.mode !== "tui") return;
+function renderFooterStatus(ctx: ExtensionContext, usage: UsageResponse, stale = false): string | undefined {
+	if (ctx.mode !== "tui") return undefined;
 	const windows = getWindows(usage);
-	if (windows.length === 0) return;
+	if (windows.length === 0) return undefined;
 
 	const text = `C ${windows.map(compactWindow).join(" ")}${stale ? "?" : ""}`;
 	const highestUsage = Math.max(...windows.map((window) => window.used_percent));
-	const themed =
-		highestUsage > 90
-			? ctx.ui.theme.fg("error", text)
-			: stale || highestUsage > 70
-				? ctx.ui.theme.fg("warning", text)
-				: ctx.ui.theme.fg("dim", text);
-	ctx.ui.setStatus(FOOTER_STATUS_KEY, themed);
+	return highestUsage > 90
+		? ctx.ui.theme.fg("error", text)
+		: stale || highestUsage > 70
+			? ctx.ui.theme.fg("warning", text)
+			: ctx.ui.theme.fg("dim", text);
 }
 
-function publishUnknownFooterStatus(ctx: ExtensionContext): void {
-	if (ctx.mode !== "tui") return;
-	ctx.ui.setStatus(FOOTER_STATUS_KEY, ctx.ui.theme.fg("warning", "C ?"));
+function renderUnknownFooterStatus(ctx: ExtensionContext): string | undefined {
+	return ctx.mode === "tui" ? ctx.ui.theme.fg("warning", "C ?") : undefined;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -188,17 +185,27 @@ export default function (pi: ExtensionAPI) {
 	let refreshInFlight: Promise<UsageResponse> | undefined;
 	let latestUsage: UsageResponse | undefined;
 	let latestUsageAt = 0;
+	let footerStatusPublished = false;
+	let publishedFooterStatus: string | undefined;
+
+	function publishFooterStatus(ctx: ExtensionContext, value: string | undefined): void {
+		if (ctx.mode !== "tui") return;
+		if (footerStatusPublished && publishedFooterStatus === value) return;
+		footerStatusPublished = true;
+		publishedFooterStatus = value;
+		ctx.ui.setStatus(FOOTER_STATUS_KEY, value);
+	}
 
 	function publishRefreshFailure(ctx: ExtensionContext): void {
 		if (!sessionActive || ctx.mode !== "tui") return;
 		if (!latestUsage) {
-			publishUnknownFooterStatus(ctx);
+			publishFooterStatus(ctx, renderUnknownFooterStatus(ctx));
 			return;
 		}
 
 		const age = Date.now() - latestUsageAt;
-		if (age >= UNKNOWN_AFTER_MS) publishUnknownFooterStatus(ctx);
-		else if (age >= STALE_AFTER_MS) publishFooterStatus(ctx, latestUsage, true);
+		if (age >= UNKNOWN_AFTER_MS) publishFooterStatus(ctx, renderUnknownFooterStatus(ctx));
+		else if (age >= STALE_AFTER_MS) publishFooterStatus(ctx, renderFooterStatus(ctx, latestUsage, true));
 		// For short outages, leave the recent successful value unchanged.
 	}
 
@@ -213,7 +220,7 @@ export default function (pi: ExtensionAPI) {
 			const usage = await task;
 			latestUsage = usage;
 			latestUsageAt = Date.now();
-			if (sessionActive) publishFooterStatus(ctx, usage);
+			if (sessionActive) publishFooterStatus(ctx, renderFooterStatus(ctx, usage));
 			return usage;
 		} catch (error) {
 			publishRefreshFailure(ctx);
@@ -258,6 +265,8 @@ export default function (pi: ExtensionAPI) {
 		latestUsage = undefined;
 		latestUsageAt = 0;
 		ctx.ui.setStatus(FOOTER_STATUS_KEY, undefined);
+		footerStatusPublished = false;
+		publishedFooterStatus = undefined;
 	});
 
 	pi.registerCommand("codex-usage", {
