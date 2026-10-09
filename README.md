@@ -25,11 +25,9 @@ restores the normal value automatically. `/codex-usage` always reports the
 specific request or response error.
 
 For first-line placement, install and enable
-[`pi-footer-compositor`](../pi-footer-compositor/). Pi has no manifest mechanism
-for extension-to-extension activation dependencies, so this is an optional,
-gracefully degraded dependency: without the compositor, Pi displays the compact
-value on its ordinary extension-status line. Installing the complete
-`pi-assorted` package loads both extensions.
+[`pi-footer-compositor`](https://github.com/7h145/pi-footer-compositor).
+The compositor is optional and is not installed automatically. Without it,
+Pi displays the compact value on its ordinary extension-status line.
 
 ## Command
 
@@ -60,22 +58,30 @@ out after 15 seconds. OAuth tokens and response bodies are not logged.
 
 ## Install / try locally
 
-Install the complete package:
+Install this extension from GitHub:
 
 ```bash
-pi install git:github.com/7h145/pi-assorted
+pi install git:github.com/7h145/pi-codex-usage
 ```
 
-Or load the compositor and this extension directly from the repository root:
+For first-line footer placement, also install the optional compositor:
 
 ```bash
-pi \
-  -e ./extensions/pi-footer-compositor/pi-footer-compositor.ts \
-  -e ./extensions/pi-codex-usage/pi-codex-usage.ts
+pi install git:github.com/7h145/pi-footer-compositor
 ```
 
-If `pi-assorted` is already installed, these explicit files create a second copy
-of only the named extensions. Disable their installed copies with `pi config`,
-or use `--no-extensions` for an isolated run.
+These are personal/global installs. Add `-l` to each command for project-local
+installs. Run `/reload` after installing or updating while Pi is running,
+then run `/codex-usage`.
 
-Then run `/codex-usage`.
+If you already use these extensions through `pi-assorted`, disable those copies
+with `pi config` before installing the standalone packages.
+
+To try a local checkout without installing, run from its root:
+
+```bash
+pi --no-extensions -e .
+```
+
+This loads only the checkout's extension, without the optional compositor or
+duplicate installed copies. Then run `/codex-usage`.
