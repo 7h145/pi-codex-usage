@@ -56,7 +56,7 @@ This extension calls the undocumented ChatGPT backend endpoint
 OpenAI Platform API and may change or disappear without notice. Requests time
 out after 15 seconds. OAuth tokens and response bodies are not logged.
 
-## Install / try locally
+## Installation
 
 Install this extension from GitHub:
 
@@ -74,9 +74,6 @@ These are personal/global installs. Add `-l` to each command for project-local
 installs. Run `/reload` after installing or updating while Pi is running,
 then run `/codex-usage`.
 
-If you already use these extensions through `pi-assorted`, disable those copies
-with `pi config` before installing the standalone packages.
-
 To try a local checkout without installing, run from its root:
 
 ```bash
@@ -85,3 +82,22 @@ pi --no-extensions -e .
 
 This loads only the checkout's extension, without the optional compositor or
 duplicate installed copies. Then run `/codex-usage`.
+
+### Migrating from pi-assorted
+
+If you have the legacy [`pi-assorted`](https://github.com/7h145/pi-assorted)
+collection installed, turn off its pi-codex-usage extension before installing this
+standalone version. Otherwise Pi will try to load the same extension twice.
+
+Run `pi config` in a terminal. Under the `pi-assorted` package's Extensions
+entries, select `pi-codex-usage/pi-codex-usage.ts` and press Space to uncheck it
+(`[ ]`). Changes are saved immediately; press Esc to close.
+
+For a project-local collection installation, run `pi config -l` from that
+project and press Space until the entry shows `[-]` (project unload).
+
+If you also install the compositor separately, turn off its
+`pi-footer-compositor/pi-footer-compositor.ts` entry in the collection too.
+
+See Pi's [resource settings reference](https://pi.dev/docs/latest/settings#resources)
+for configuration details.
