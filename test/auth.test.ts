@@ -2,94 +2,61 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { deferred, fixture, flush, oauth, response, token, usage } from "./helpers.ts";
 
-test("uses Sign in with ChatGPT credentials for the openai provider", async (t) => {
+test("always uses legacy OAuth even when openai is selected and both logins exist", async (t) => {
 	const f = fixture(t);
 	f.setProvider("openai");
-	f.setAuth(async (id) => id === "openai" ? oauth("synthetic-modern") : oauth("synthetic-legacy"));
-	await f.command();
-	assert.deepEqual(f.authCalls, ["openai"]);
-	assert.equal(f.requests[0].url, "https://chatgpt.com/backend-api/wham/usage");
-	assert.deepEqual(f.requests[0].init.headers, {
-		Authorization: `Bearer ${token("synthetic-modern")}`,
-		"ChatGPT-Account-Id": "synthetic-modern", Accept: "application/json", Originator: "pi-codex-usage",
-	});
-	assert.equal(f.requests[0].init.redirect, "error");
-	assert.match(f.notices[0].message, /Provider: openai\n/);
-});
-
-test("keeps legacy OAuth first for a selected legacy model", async (t) => {
-	const f = fixture(t);
 	f.setAuth(async (id) => oauth(`synthetic-${id}`));
 	await f.command();
 	assert.deepEqual(f.authCalls, ["openai-codex"]);
-	assert.match(f.notices[0].message, /Provider: openai-codex/);
+	assert.equal(f.requests[0].url, "https://chatgpt.com/backend-api/wham/usage");
+	assert.deepEqual(f.requests[0].init.headers, {
+		Authorization: `Bearer ${token("synthetic-openai-codex")}`,
+		"ChatGPT-Account-Id": "synthetic-openai-codex", Accept: "application/json", Originator: "pi-codex-usage",
+	});
+	assert.equal(f.requests[0].init.redirect, "error");
+	assert.match(f.notices[0].message, /Provider: openai-codex\n/);
+	assert.equal(f.statuses.length, 0);
 });
 
-test("prefers modern OAuth when another provider's model is selected", async (t) => {
-	const f = fixture(t);
-	f.setProvider("anthropic");
-	f.setAuth(async () => oauth());
-	await f.command();
-	assert.deepEqual(f.authCalls, ["openai"]);
-});
-
-test("skips API-key auth, even if the value looks like a JWT", async (t) => {
-	const f = fixture(t);
-	f.setProvider("openai");
-	f.setAuth(async (id) => id === "openai" ? { source: "OPENAI_API_KEY", auth: { apiKey: token("synthetic-api-key") } } : oauth());
-	await f.command();
-	assert.deepEqual(f.authCalls, ["openai", "openai-codex"]);
-	assert.equal((f.requests[0].init.headers as Record<string, string>)["ChatGPT-Account-Id"], "synthetic-account");
-});
-
-test("explains missing OAuth without making a usage request", async (t) => {
-	const f = fixture(t);
-	f.setProvider("openai");
-	f.setAuth(async () => undefined);
-	await f.command();
-	assert.equal(f.requests.length, 0);
-	assert.match(f.notices[0].message, /No ChatGPT OAuth login.*Run \/login and choose OpenAI Codex \(legacy\)/);
-	assert.doesNotMatch(f.notices[0].message, /Sign in with ChatGPT|OpenAI →/);
-});
+for (const source of [undefined, "OPENAI_API_KEY"]) {
+	test(`missing legacy OAuth (${source}) never falls back to a modern login`, async (t) => {
+		const f = fixture(t);
+		f.setProvider("openai");
+		f.setAuth(async (id) => id === "openai" ? oauth() : source ? { source, auth: { apiKey: token("synthetic-key") } } : undefined);
+		await f.command();
+		assert.deepEqual(f.authCalls, ["openai-codex"]);
+		assert.equal(f.requests.length, 0);
+		assert.match(f.notices[0].message, /No openai-codex ChatGPT OAuth login.*Run \/login and choose OpenAI Codex \(legacy\)/);
+		assert.doesNotMatch(f.notices[0].message, /Sign in with ChatGPT|OpenAI →/);
+		assert.equal(f.statuses.length, 0);
+	});
+}
 
 test("reports credential resolution failure without exposing SDK error details", async (t) => {
 	const f = fixture(t);
 	f.setAuth(async () => { throw new Error("SYNTHETIC_PRIVATE_REFRESH_BODY"); });
 	await f.command();
+	assert.deepEqual(f.authCalls, ["openai-codex"]);
 	assert.match(f.notices[0].message, /Pi could not resolve openai-codex credentials/);
 	assert.doesNotMatch(f.notices[0].message, /PRIVATE_REFRESH|not logged in/);
 	assert.match(f.notices[0].message, /Run \/login and choose OpenAI Codex \(legacy\)/);
 });
 
-test("modern credential errors do not recommend an unsupported login for usage", async (t) => {
+test("rejected legacy credentials never cause a modern usage request", async (t) => {
 	const f = fixture(t);
-	f.setProvider("openai");
-	f.setAuth(async () => { throw new Error("SYNTHETIC_PRIVATE_REFRESH_BODY"); });
-	await f.command();
-	assert.deepEqual(f.authCalls, ["openai"]);
-	assert.equal(f.requests.length, 0);
-	assert.match(f.notices[0].message, /Pi could not resolve openai credentials/);
-	assert.match(f.notices[0].message, /Usage retrieval with openai is not supported/);
-	assert.match(f.notices[0].message, /https:\/\/chatgpt.com\/settings\/usage/);
-	assert.doesNotMatch(f.notices[0].message, /PRIVATE_REFRESH|Run \/login|Sign in with ChatGPT/);
-});
-
-test("does not fall back to another account after rejection", async (t) => {
-	const f = fixture(t);
-	f.setProvider("openai");
+	f.setProvider("anthropic");
 	f.setAuth(async () => oauth());
 	f.setFetch(async () => response({}, 403));
 	await f.command();
-	assert.deepEqual(f.authCalls, ["openai"]);
+	assert.deepEqual(f.authCalls, ["openai-codex"]);
 	assert.equal(f.requests.length, 1);
-	assert.match(f.notices[0].message, /rejected the openai ChatGPT OAuth token \(HTTP 403\)/);
-	assert.match(f.notices[0].message, /does not mean your model login failed/);
-	assert.match(f.notices[0].message, /No legacy usage request was made/);
-	assert.doesNotMatch(f.notices[0].message, /Run \/login/);
+	assert.match(f.notices[0].message, /rejected the openai-codex credentials \(HTTP 403\)/);
+	assert.match(f.notices[0].message, /Run \/login and choose OpenAI Codex \(legacy\)/);
+	assert.equal(f.statuses.length, 0);
 });
 
 for (const invalidToken of ["not-a-jwt", "synthetic.!.signature", "synthetic.bnVsbA.signature", "synthetic.e30.signature", token("unsafe\nheader")]) {
-	test(`rejects unusable OAuth claims without a request: ${JSON.stringify(invalidToken)}`, async (t) => {
+	test(`rejects unusable legacy OAuth claims without a request: ${JSON.stringify(invalidToken)}`, async (t) => {
 		const f = fixture(t);
 		f.setAuth(async () => ({ source: "OAuth", auth: { apiKey: invalidToken } }));
 		await f.command();

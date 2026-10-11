@@ -214,26 +214,24 @@ test("a changed OAuth account clears old usage before a failed request", async (
 	assert.equal(f.status(), "initial:warning:C ?");
 });
 
-test("model selection replaces a legacy request with the modern provider", async (t) => {
+test("model changes hide the footer without cancelling a shared legacy command", async (t) => {
 	const f = fixture(t);
-	f.setAuth(async (id) => oauth(`synthetic-${id}`));
 	const pending = deferred<Response>();
 	f.setFetch(() => pending.promise);
 	f.start();
-	const oldCommand = f.command();
+	const command = f.command();
 	await flush();
+	assert.equal(f.status(), "initial:warning:C ?");
 	f.setProvider("openai");
-	f.setFetch(async () => response(usage(31)));
 	f.emit("model_select");
-	await oldCommand;
-	await flush();
-	assert.equal(f.requests[0].init.signal?.aborted, true);
-	assert.equal((f.requests[1].init.headers as Record<string, string>)["ChatGPT-Account-Id"], "synthetic-openai");
-	assert.equal(f.status(), "initial:dim:C 5h31% W48%");
-	assert.equal(f.notices.length, 0);
+	assert.equal(f.status(), undefined);
+	assert.equal(f.requests[0].init.signal?.aborted, false);
 	pending.resolve(response(usage(99)));
-	await flush();
-	assert.equal(f.status(), "initial:dim:C 5h31% W48%");
+	await command;
+	assert.equal(f.status(), undefined);
+	assert.equal(f.requests.length, 1);
+	assert.equal(f.notices.length, 1);
+	assert.match(f.notices[0].message, /Provider: openai-codex/);
 });
 
 for (const mode of ["print", "json"] as const) {

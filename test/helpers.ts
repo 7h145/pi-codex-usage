@@ -21,10 +21,6 @@ export function token(accountId = "synthetic-account"): string {
 export function oauth(accountId = "synthetic-account") {
 	return { source: "OAuth", auth: { apiKey: token(accountId) } };
 }
-export function modernOAuth(subject = "synthetic-modern-user") {
-	const payload = { iss: "https://auth.openai.com", aud: "https://api.openai.com/v1", sub: subject };
-	return { source: "OAuth", auth: { apiKey: `synthetic.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature` } };
-}
 export function usage(percent = 23) {
 	return {
 		plan_type: "plus",
@@ -60,7 +56,7 @@ export function fixture(t: TestContext, mode: "tui" | "rpc" | "print" | "json" =
 
 	let alive = true;
 	let idle = true;
-	let provider: string = "openai-codex";
+	let provider: string | undefined = "openai-codex";
 	let theme = "initial";
 	let stopped = false;
 	const assertAlive = () => assert.ok(alive, "accessed a disposed Pi context");
@@ -87,7 +83,7 @@ export function fixture(t: TestContext, mode: "tui" | "rpc" | "print" | "json" =
 	const ctx = {
 		get mode() { assertAlive(); return mode; },
 		get hasUI() { assertAlive(); return mode === "tui" || mode === "rpc"; },
-		get model() { assertAlive(); return { provider }; },
+		get model() { assertAlive(); return provider === undefined ? undefined : { provider }; },
 		get modelRegistry() { assertAlive(); return registry; },
 		get ui() { assertAlive(); return ui; },
 		isIdle: () => { assertAlive(); return idle; },
@@ -118,7 +114,7 @@ export function fixture(t: TestContext, mode: "tui" | "rpc" | "print" | "json" =
 		invalidate: () => { alive = false; },
 		setIdle: (value: boolean) => { idle = value; },
 		setTheme: (value: string) => { theme = value; },
-		setProvider: (value: string) => { provider = value; },
+		setProvider: (value: string | undefined) => { provider = value; },
 		setAuth: (fn: typeof resolveAuth) => { resolveAuth = fn; },
 		setFetch: (fn: typeof fetchResponse) => { fetchResponse = fn; },
 		status: () => statuses.at(-1)?.value,

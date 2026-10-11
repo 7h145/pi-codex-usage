@@ -1,14 +1,19 @@
 # pi-codex-usage
 
 Shows ChatGPT-backed Codex usage in Pi's footer and through `/codex-usage`.
-Usage retrieval works with the **`openai-codex` OAuth login**, not the newer
-**`openai` ChatGPT login**. See [OpenAI provider limitation](#openai-provider-limitation)
-below.
+Usage data always comes from the **`openai-codex` OAuth login**. The command
+works regardless of the selected model; the footer appears only for
+`openai-codex` models. The newer `openai` login is not a usage source; see
+[OpenAI provider limitation](#openai-provider-limitation) below.
 
 ## Footer status
 
-In TUI mode, the extension fetches usage at session startup, after the agent
-settles, when the model changes, and every five minutes while idle. It publishes
+The footer status is shown only in TUI mode while the selected model's provider
+is `openai-codex`. No usage status, not even `C ?`, is shown for other providers,
+and there are no new automatic usage requests while they are selected.
+
+For `openai-codex` models, the extension fetches usage at startup, after the agent
+settles, when you select a model, and every five minutes while idle. It publishes
 a compact status such as:
 
 ```text
@@ -29,8 +34,8 @@ successful value is retained for 15 minutes, then marked stale with
 no successful value exists, the footer shows `C ?`. A later successful refresh
 restores the normal value automatically. Aging and theme styling are checked
 once per second, even while the agent is busy; this does not make extra network
-requests. Changing provider preference or detecting a different OAuth account
-clears the old value rather than presenting another account's usage.
+requests. Detecting a different OAuth account clears the old value rather than
+presenting another account's usage.
 
 `/codex-usage` reports request or response error categories without including raw
 response bodies or credential-refresh details. Shutdown and session replacement
@@ -46,6 +51,13 @@ Pi displays the compact value on its ordinary extension-status line.
 ```text
 /codex-usage
 ```
+
+Run this command to check Codex usage at any time, including while using an
+`openai`, Anthropic or other model. It always refreshes usage through
+`openai-codex`; it does not return the previously cached value or change your
+selected model. If a refresh is already in progress, the command waits for its
+result rather than starting a duplicate request. Checking usage while using
+another provider does not make the footer appear or start background polling.
 
 Available in TUI and RPC modes. Print and JSON modes report an unsupported-mode
 error before resolving credentials or fetching usage; notifications would be
@@ -70,12 +82,10 @@ The extension reuses the OAuth login through Pi's model registry. It does not
 read credential files or store or log tokens. OpenAI Platform API keys cannot
 retrieve ChatGPT subscription usage and are never sent to the usage endpoint.
 
-The command's `Provider` line identifies the credentials used to retrieve usage,
-not necessarily the selected model provider. If the extension uses another
-provider's login as a fallback, the command explains why and the footer adds a
-source label, such as `C W2% [legacy]`. See the
-[OpenAI provider limitation](#openai-provider-limitation) for how provider
-selection affects this.
+The command's `Provider: openai-codex` line identifies the source of the usage
+data, not necessarily the selected model provider. There is no credential
+fallback: the extension uses only `openai-codex`, even if other logins are
+available.
 
 ## Important caveat
 
@@ -97,22 +107,13 @@ Repeating a valid login is not a remedy. For that provider, check
 
 Pi stores `openai` and `openai-codex` logins separately. Switching models does
 not migrate credentials or change which authentication method is configured.
+The extension does not resolve or send `openai` credentials.
 
-The extension tries the selected model's OpenAI provider first; for other
-models it tries `openai` first. If that provider is unavailable, has no login,
-or uses API-key authentication, it can fall back to the other provider. This
-allows legacy Codex usage to be displayed while another model is selected.
-But if an `openai` OAuth login is present and its usage request is rejected,
-the extension reports the rejection; it does not silently try legacy
-credentials afterward. If both logins are present, select an `openai-codex`
-model before running `/codex-usage` to query the legacy quota. The extension
-does not change your model for you.
-
-A `[legacy]` footer label means the displayed value comes from `openai-codex`.
-The reverse fallback is labelled `[openai]`, but that label is not evidence of
-working newer-provider usage support. **Legacy Codex quota is not a verified
-remaining budget for a selected `openai` model.** This extension does not show
-OpenAI Platform API billing or every model-specific limit.
+You can still run `/codex-usage` while using an `openai` model: it reports Codex
+usage through the separate `openai-codex` login, without changing your model.
+**Legacy Codex quota is not a verified remaining budget for a selected `openai`
+model.** This extension does not show OpenAI Platform API billing or every
+model-specific limit.
 
 ## Installation
 
@@ -171,10 +172,10 @@ npm run check
 
 `check` runs TypeScript checking and Node's regression tests. The tests use
 synthetic OAuth credentials, a fake clock and mocked HTTP; they do not read
-credential files or call ChatGPT. They cover credential selection,
-legacy-token and metadata-free-token handling, endpoint rejection, validation,
-shared refreshes, cancellation, session replacement, cache aging, themes and
-mode guards. Mocked success does not establish live provider support.
+credential files or call ChatGPT. They cover the legacy-only usage source,
+provider-dependent footer visibility, fresh command results, endpoint rejection,
+validation, shared refreshes, cancellation, session replacement, cache aging,
+themes and mode guards. Mocked success does not establish live provider support.
 CI runs the checks on Node.js 24 with Pi SDKs 1.0.2 and 1.1.0.
 
 ## Last confirmed working
