@@ -48,7 +48,8 @@ test("explains missing OAuth without making a usage request", async (t) => {
 	f.setAuth(async () => undefined);
 	await f.command();
 	assert.equal(f.requests.length, 0);
-	assert.match(f.notices[0].message, /No ChatGPT OAuth login.*Sign in with ChatGPT/);
+	assert.match(f.notices[0].message, /No ChatGPT OAuth login.*Run \/login and choose OpenAI Codex \(legacy\)/);
+	assert.doesNotMatch(f.notices[0].message, /Sign in with ChatGPT|OpenAI →/);
 });
 
 test("reports credential resolution failure without exposing SDK error details", async (t) => {
@@ -57,6 +58,20 @@ test("reports credential resolution failure without exposing SDK error details",
 	await f.command();
 	assert.match(f.notices[0].message, /Pi could not resolve openai-codex credentials/);
 	assert.doesNotMatch(f.notices[0].message, /PRIVATE_REFRESH|not logged in/);
+	assert.match(f.notices[0].message, /Run \/login and choose OpenAI Codex \(legacy\)/);
+});
+
+test("modern credential errors do not recommend an unsupported login for usage", async (t) => {
+	const f = fixture(t);
+	f.setProvider("openai");
+	f.setAuth(async () => { throw new Error("SYNTHETIC_PRIVATE_REFRESH_BODY"); });
+	await f.command();
+	assert.deepEqual(f.authCalls, ["openai"]);
+	assert.equal(f.requests.length, 0);
+	assert.match(f.notices[0].message, /Pi could not resolve openai credentials/);
+	assert.match(f.notices[0].message, /Usage retrieval with openai is not supported/);
+	assert.match(f.notices[0].message, /https:\/\/chatgpt.com\/settings\/usage/);
+	assert.doesNotMatch(f.notices[0].message, /PRIVATE_REFRESH|Run \/login|Sign in with ChatGPT/);
 });
 
 test("does not fall back to another account after rejection", async (t) => {

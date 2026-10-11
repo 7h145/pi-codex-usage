@@ -184,7 +184,10 @@ async function resolveChatGPTAuth(registry: ExtensionContext["modelRegistry"], p
 			auth = await withAbort(registry.getProviderAuth(provider), signal);
 		} catch {
 			if (signal.aborted) throw signal.reason;
-			throw new UsageError(`Pi could not resolve ${provider} credentials. Run /login again.`);
+			const advice = provider === "openai-codex"
+				? "Run /login and choose OpenAI Codex (legacy)."
+				: "Usage retrieval with openai is not supported. Check subscription usage at https://chatgpt.com/settings/usage.";
+			throw new UsageError(`Pi could not resolve ${provider} credentials. ${advice}`);
 		}
 		// Ordinary OpenAI API keys cannot query ChatGPT subscription usage.
 		if (auth?.source !== "OAuth") {
@@ -204,7 +207,7 @@ async function resolveChatGPTAuth(registry: ExtensionContext["modelRegistry"], p
 			: `account:${accountId}`;
 		return { provider, token, accountId, accountKey, fallbackReason };
 	}
-	throw new UsageError("No ChatGPT OAuth login is available. Run /login and choose OpenAI → Sign in with ChatGPT, or OpenAI Codex (legacy).");
+	throw new UsageError("No ChatGPT OAuth login is available for Codex usage. Run /login and choose OpenAI Codex (legacy).");
 }
 
 async function fetchUsage(
