@@ -72,11 +72,23 @@ ChatGPT usage endpoint. Credential resolution errors, malformed OAuth tokens
 and backend rejection are reported without silently switching to another
 account. The command identifies which provider supplied the credentials.
 
-Both credential paths are implemented, but acceptance of newer `openai` tokens
-by the undocumented endpoint has not been confirmed live. A working model login
-does not guarantee access to this endpoint. The extension shows its top-level
-Codex quota windows, not OpenAI Platform API billing or every model-specific
-limit.
+The two providers have separate logins; switching models does not migrate
+credentials. Newer `openai` OAuth tokens need not contain a Codex account ID.
+The extension omits the account header when it is absent rather than guessing
+an ID or substituting legacy credentials. Legacy tokens still require that ID.
+Without account metadata, a token change clears cached usage conservatively,
+including when Pi rotates the token.
+
+**Newer-token limitation:** a live request using `openai` ChatGPT OAuth without
+an account header returned HTTP 401. That login can work for model requests
+while being rejected by this endpoint. The extension reports that distinction
+and links to [ChatGPT usage](https://chatgpt.com/settings/usage), rather than
+suggesting another login or silently querying a legacy account. Acceptance of
+newer tokens is not established by mocked tests.
+
+This endpoint reports top-level Codex quota windows, not OpenAI Platform API
+billing or every model-specific limit. Legacy Codex usage does not establish
+the remaining budget for newer `openai` subscription models.
 
 ## Important caveat
 

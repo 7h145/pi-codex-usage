@@ -67,7 +67,10 @@ test("does not fall back to another account after rejection", async (t) => {
 	await f.command();
 	assert.deepEqual(f.authCalls, ["openai"]);
 	assert.equal(f.requests.length, 1);
-	assert.match(f.notices[0].message, /rejected the openai credentials \(HTTP 403\)/);
+	assert.match(f.notices[0].message, /rejected the openai ChatGPT OAuth token \(HTTP 403\)/);
+	assert.match(f.notices[0].message, /does not mean your model login failed/);
+	assert.match(f.notices[0].message, /No legacy credentials were tried/);
+	assert.doesNotMatch(f.notices[0].message, /Run \/login/);
 });
 
 for (const invalidToken of ["not-a-jwt", "synthetic.!.signature", "synthetic.bnVsbA.signature", "synthetic.e30.signature", token("unsafe\nheader")]) {

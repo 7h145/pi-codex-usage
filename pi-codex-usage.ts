@@ -15,6 +15,7 @@
  * Last verified with Pi: 1.1.0 (automated; mocked auth/HTTP)
  */
 
+import { createHash } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -44,7 +45,7 @@ type UsageProvider = "openai" | "openai-codex";
 interface UsageSnapshot {
 	usage: UsageResponse;
 	provider: UsageProvider;
-	accountId: string;
+	accountKey: string;
 }
 
 class UsageError extends Error {}
@@ -54,9 +55,10 @@ function preferredProvider(ctx: ExtensionContext): UsageProvider {
 	return ctx.model?.provider === "openai-codex" ? "openai-codex" : "openai";
 }
 
-function extractAccountId(token: string, provider: UsageProvider): string {
+function extractAccountId(token: string, provider: UsageProvider): string | undefined {
 	const parts = token.split(".");
 	if (parts.length !== 3) {
+		if (provider === "openai") return undefined;
 		throw new UsageError(`The ${provider} credential is not a ChatGPT OAuth token. Run /login again.`);
 	}
 
@@ -64,11 +66,13 @@ function extractAccountId(token: string, provider: UsageProvider): string {
 	try {
 		payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
 	} catch {
+		if (provider === "openai") return undefined;
 		throw new UsageError(`Could not decode the ${provider} ChatGPT OAuth token.`);
 	}
 
 	const claim = payload && typeof payload === "object" ? (payload as Record<string, unknown>)[AUTH_CLAIM] : undefined;
 	const accountId = claim && typeof claim === "object" ? (claim as Record<string, unknown>).chatgpt_account_id : undefined;
+	if (provider === "openai" && accountId === undefined) return undefined;
 	if (typeof accountId !== "string" || !accountId || /[^\x21-\x7e]/.test(accountId)) {
 		throw new UsageError(`The ${provider} OAuth token does not contain a usable ChatGPT account ID.`);
 	}
@@ -181,7 +185,14 @@ async function resolveChatGPTAuth(registry: ExtensionContext["modelRegistry"], p
 		if (auth?.source !== "OAuth") continue;
 		const token = auth.auth.apiKey;
 		if (!token) throw new UsageError(`Pi did not provide a ChatGPT access token for ${provider}.`);
-		return { provider, token, accountId: extractAccountId(token, provider) };
+		const accountId = extractAccountId(token, provider);
+		// Newer OAuth tokens need not carry Codex account metadata. Without it,
+		// conservatively invalidate old usage when the token changes, including
+		// rotation. Never retain the bearer token in cached status state.
+		const accountKey = accountId === undefined
+			? `token:${createHash("sha256").update(token).digest("hex")}`
+			: `account:${accountId}`;
+		return { provider, token, accountId, accountKey };
 	}
 	throw new UsageError("No ChatGPT OAuth login is available. Run /login and choose OpenAI → Sign in with ChatGPT, or OpenAI Codex (legacy).");
 }
@@ -189,7 +200,7 @@ async function resolveChatGPTAuth(registry: ExtensionContext["modelRegistry"], p
 async function fetchUsage(
 	ctx: ExtensionContext,
 	signal: AbortSignal,
-	onAccount: (provider: UsageProvider, accountId: string) => void,
+	onAccount: (provider: UsageProvider, accountKey: string) => void,
 ): Promise<UsageSnapshot> {
 	const registry = ctx.modelRegistry;
 	const preferred = preferredProvider(ctx);
@@ -198,15 +209,15 @@ async function fetchUsage(
 	const timeout = setTimeout(() => deadline.abort(), REQUEST_TIMEOUT_MS);
 	timeout.unref();
 	try {
-		const { provider, token, accountId } = await resolveChatGPTAuth(registry, preferred, requestSignal);
+		const { provider, token, accountId, accountKey } = await resolveChatGPTAuth(registry, preferred, requestSignal);
 		requestSignal.throwIfAborted();
-		onAccount(provider, accountId);
+		onAccount(provider, accountKey);
 		const response = await withAbort(fetch(USAGE_URL, {
 			signal: requestSignal,
 			redirect: "error",
 			headers: {
 				Authorization: `Bearer ${token}`,
-				"ChatGPT-Account-Id": accountId,
+				...(accountId === undefined ? {} : { "ChatGPT-Account-Id": accountId }),
 				Accept: "application/json",
 				Originator: "pi-codex-usage",
 			},
@@ -215,6 +226,9 @@ async function fetchUsage(
 		if (!response.ok) {
 			void response.body?.cancel().catch(() => {});
 			if (response.status === 401 || response.status === 403) {
+				if (provider === "openai") {
+					throw new UsageError(`The Codex usage endpoint rejected the openai ChatGPT OAuth token (HTTP ${response.status}). This does not mean your model login failed. Check subscription usage at https://chatgpt.com/settings/usage. No legacy credentials were tried.`);
+				}
 				throw new UsageError(`ChatGPT rejected the ${provider} credentials (HTTP ${response.status}). Run /login again.`);
 			}
 			throw new UsageError(`ChatGPT usage request failed (HTTP ${response.status}).`);
@@ -227,7 +241,7 @@ async function fetchUsage(
 			if (requestSignal.aborted) throw requestSignal.reason;
 			throw new UsageError("The ChatGPT usage response was not valid JSON.");
 		}
-		return { usage: parseUsage(payload), provider, accountId };
+		return { usage: parseUsage(payload), provider, accountKey };
 	} catch (error) {
 		if (signal.aborted) throw new RefreshCancelled("Codex usage refresh cancelled.");
 		if (deadline.signal.aborted) throw new UsageError("Codex usage refresh timed out after 15 seconds.");
@@ -336,9 +350,9 @@ export default function (pi: ExtensionAPI) {
 		inFlight = request;
 		request.task = (async () => {
 			try {
-				const snapshot = await fetchUsage(ctx, request.controller.signal, (provider, accountId) => {
+				const snapshot = await fetchUsage(ctx, request.controller.signal, (provider, accountKey) => {
 					if (!isCurrent(request)) return;
-					if (latestUsage && (latestUsage.provider !== provider || latestUsage.accountId !== accountId)) {
+					if (latestUsage && (latestUsage.provider !== provider || latestUsage.accountKey !== accountKey)) {
 						clearCache();
 						publishCachedStatus(latestCtx ?? ctx);
 					}

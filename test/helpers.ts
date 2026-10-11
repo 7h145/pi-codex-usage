@@ -21,6 +21,10 @@ export function token(accountId = "synthetic-account"): string {
 export function oauth(accountId = "synthetic-account") {
 	return { source: "OAuth", auth: { apiKey: token(accountId) } };
 }
+export function modernOAuth(subject = "synthetic-modern-user") {
+	const payload = { iss: "https://auth.openai.com", aud: "https://api.openai.com/v1", sub: subject };
+	return { source: "OAuth", auth: { apiKey: `synthetic.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature` } };
+}
 export function usage(percent = 23) {
 	return {
 		plan_type: "plus",
