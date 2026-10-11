@@ -6,13 +6,13 @@
  * Strategy: reuse Pi's ChatGPT OAuth access token to query the
  * undocumented ChatGPT `/wham/usage` endpoint. Refresh at TUI startup, after
  * the agent settles, and periodically while idle. Validate responses before
- * publishing and degrade stale values to `?` when refreshes keep failing.
+ * publishing and age cached values independently of refresh attempts.
  *
  * Author: thias <github.attic@typedef.net>, OpenAI Codex (5.6)
  * License: MIT
  * Version: 0.1
  * Date: 2026-07-16
- * Last verified with Pi: 0.80.6
+ * Last verified with Pi: 1.1.0 (automated; mocked auth/HTTP)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -21,6 +21,7 @@ const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const AUTH_CLAIM = "https://api.openai.com/auth";
 const REQUEST_TIMEOUT_MS = 15_000;
 const BACKGROUND_REFRESH_INTERVAL_MS = 5 * 60_000;
+const DISPLAY_REFRESH_INTERVAL_MS = 1_000;
 const STALE_AFTER_MS = 15 * 60_000;
 const UNKNOWN_AFTER_MS = 60 * 60_000;
 const FOOTER_STATUS_KEY = "footer-compositor:right:20:codex-usage";
@@ -185,16 +186,21 @@ async function resolveChatGPTAuth(registry: ExtensionContext["modelRegistry"], p
 	throw new UsageError("No ChatGPT OAuth login is available. Run /login and choose OpenAI → Sign in with ChatGPT, or OpenAI Codex (legacy).");
 }
 
-async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<UsageSnapshot> {
+async function fetchUsage(
+	ctx: ExtensionContext,
+	signal: AbortSignal,
+	onAccount: (provider: UsageProvider, accountId: string) => void,
+): Promise<UsageSnapshot> {
 	const registry = ctx.modelRegistry;
 	const preferred = preferredProvider(ctx);
 	const deadline = new AbortController();
-	const requestSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+	const requestSignal = AbortSignal.any([signal, deadline.signal]);
 	const timeout = setTimeout(() => deadline.abort(), REQUEST_TIMEOUT_MS);
 	timeout.unref();
 	try {
 		const { provider, token, accountId } = await resolveChatGPTAuth(registry, preferred, requestSignal);
 		requestSignal.throwIfAborted();
+		onAccount(provider, accountId);
 		const response = await withAbort(fetch(USAGE_URL, {
 			signal: requestSignal,
 			redirect: "error",
@@ -223,7 +229,7 @@ async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<
 		}
 		return { usage: parseUsage(payload), provider, accountId };
 	} catch (error) {
-		if (signal?.aborted) throw new RefreshCancelled("Codex usage refresh cancelled.");
+		if (signal.aborted) throw new RefreshCancelled("Codex usage refresh cancelled.");
 		if (deadline.signal.aborted) throw new UsageError("Codex usage refresh timed out after 15 seconds.");
 		throw error instanceof UsageError ? error : new UsageError("Could not reach the ChatGPT usage endpoint.");
 	} finally {
@@ -271,104 +277,150 @@ function renderUnknownFooterStatus(ctx: ExtensionContext): string | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
-	let sessionActive = false;
+	let closed = false;
+	let generation = 0;
 	let latestCtx: ExtensionContext | undefined;
 	let refreshTimer: ReturnType<typeof setInterval> | undefined;
-	let requestController: AbortController | undefined;
-	let refreshInFlight: Promise<UsageSnapshot> | undefined;
+	let nextRefreshAt = 0;
 	let latestUsage: UsageSnapshot | undefined;
 	let latestUsageAt = 0;
+	let cachedPreference: UsageProvider | undefined;
 	let footerStatusPublished = false;
 	let publishedFooterStatus: string | undefined;
+	type Request = {
+		controller: AbortController;
+		preferred: UsageProvider;
+		generation: number;
+		task?: Promise<UsageSnapshot>;
+	};
+	let inFlight: Request | undefined;
+
+	function isCurrent(request: Request): boolean {
+		return !closed && generation === request.generation && inFlight === request;
+	}
 
 	function publishFooterStatus(ctx: ExtensionContext, value: string | undefined): void {
-		if (ctx.mode !== "tui") return;
 		if (footerStatusPublished && publishedFooterStatus === value) return;
 		footerStatusPublished = true;
 		publishedFooterStatus = value;
 		ctx.ui.setStatus(FOOTER_STATUS_KEY, value);
 	}
 
-	function publishRefreshFailure(ctx: ExtensionContext): void {
-		if (!sessionActive || ctx.mode !== "tui") return;
-		if (!latestUsage) {
-			publishFooterStatus(ctx, renderUnknownFooterStatus(ctx));
-			return;
-		}
-
+	function publishCachedStatus(ctx: ExtensionContext): void {
+		if (closed || ctx.mode !== "tui") return;
 		const age = Date.now() - latestUsageAt;
-		if (age >= UNKNOWN_AFTER_MS) publishFooterStatus(ctx, renderUnknownFooterStatus(ctx));
-		else if (age >= STALE_AFTER_MS) publishFooterStatus(ctx, renderFooterStatus(ctx, latestUsage.usage, true));
-		// For short outages, leave the recent successful value unchanged.
+		const value = !latestUsage || age >= UNKNOWN_AFTER_MS
+			? renderUnknownFooterStatus(ctx)
+			: renderFooterStatus(ctx, latestUsage.usage, age >= STALE_AFTER_MS);
+		// Rebuild styling from the current theme, including during outages and
+		// busy agent turns. Only changed output causes a UI update.
+		publishFooterStatus(ctx, value);
 	}
 
-	async function refresh(ctx: ExtensionContext): Promise<UsageSnapshot> {
-		latestCtx = ctx;
-		if (refreshInFlight) return refreshInFlight;
+	function clearCache(): void {
+		latestUsage = undefined;
+		latestUsageAt = 0;
+		cachedPreference = undefined;
+	}
 
-		requestController = new AbortController();
-		const task = fetchUsage(ctx, requestController.signal);
-		refreshInFlight = task;
-		try {
-			const usage = await task;
-			latestUsage = usage;
-			latestUsageAt = Date.now();
-			if (sessionActive) publishFooterStatus(ctx, renderFooterStatus(ctx, usage.usage));
-			return usage;
-		} catch (error) {
-			publishRefreshFailure(ctx);
-			throw error;
-		} finally {
-			if (refreshInFlight === task) refreshInFlight = undefined;
-			requestController = undefined;
-		}
+	function refresh(ctx: ExtensionContext): Promise<UsageSnapshot> {
+		if (closed) return Promise.reject(new RefreshCancelled());
+		const preferred = preferredProvider(ctx);
+		latestCtx = ctx;
+		if (inFlight?.preferred === preferred && inFlight.task) return inFlight.task;
+		inFlight?.controller.abort();
+		if (latestUsage && cachedPreference !== preferred) clearCache();
+		publishCachedStatus(ctx);
+		nextRefreshAt = Date.now() + BACKGROUND_REFRESH_INTERVAL_MS;
+		const request: Request = { controller: new AbortController(), preferred, generation };
+		inFlight = request;
+		request.task = (async () => {
+			try {
+				const snapshot = await fetchUsage(ctx, request.controller.signal, (provider, accountId) => {
+					if (!isCurrent(request)) return;
+					if (latestUsage && (latestUsage.provider !== provider || latestUsage.accountId !== accountId)) {
+						clearCache();
+						publishCachedStatus(latestCtx ?? ctx);
+					}
+				});
+				if (!isCurrent(request)) throw new RefreshCancelled();
+				latestUsage = snapshot;
+				latestUsageAt = Date.now();
+				cachedPreference = preferred;
+				publishCachedStatus(latestCtx ?? ctx);
+				return snapshot;
+			} catch (error) {
+				if (isCurrent(request)) publishCachedStatus(latestCtx ?? ctx);
+				throw error;
+			} finally {
+				// An older task must not clear a newer request's controller or task.
+				if (inFlight === request) inFlight = undefined;
+			}
+		})();
+		return request.task;
 	}
 
 	function refreshInBackground(ctx: ExtensionContext): void {
 		void refresh(ctx).catch(() => {
-			// Failure state is reflected compactly in the footer. Explicit command
-			// failures are reported to the user; background failures stay quiet.
+			// The footer reflects failures; only explicit commands notify.
 		});
 	}
 
+	function resetSession(): void {
+		generation++;
+		if (refreshTimer) clearInterval(refreshTimer);
+		refreshTimer = undefined;
+		inFlight?.controller.abort();
+		inFlight = undefined;
+		latestCtx = undefined;
+		clearCache();
+		footerStatusPublished = false;
+		publishedFooterStatus = undefined;
+	}
+
 	pi.on("session_start", (_event, ctx) => {
+		resetSession();
+		closed = false;
 		if (ctx.mode !== "tui") return;
-		sessionActive = true;
 		latestCtx = ctx;
 		refreshInBackground(ctx);
-
 		refreshTimer = setInterval(() => {
-			if (latestCtx?.isIdle()) refreshInBackground(latestCtx);
-		}, BACKGROUND_REFRESH_INTERVAL_MS);
+			const ctx = latestCtx;
+			if (closed || !ctx) return;
+			publishCachedStatus(ctx);
+			if (!inFlight && Date.now() >= nextRefreshAt && ctx.isIdle()) refreshInBackground(ctx);
+		}, DISPLAY_REFRESH_INTERVAL_MS);
 		refreshTimer.unref();
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (sessionActive) refreshInBackground(ctx);
+		if (!closed && ctx.mode === "tui") refreshInBackground(ctx);
+	});
+
+	pi.on("model_select", (_event, ctx) => {
+		if (!closed && ctx.mode === "tui") refreshInBackground(ctx);
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
-		sessionActive = false;
-		if (refreshTimer) clearInterval(refreshTimer);
-		refreshTimer = undefined;
-		latestCtx = undefined;
-		requestController?.abort();
-		requestController = undefined;
-		refreshInFlight = undefined;
-		latestUsage = undefined;
-		latestUsageAt = 0;
-		ctx.ui.setStatus(FOOTER_STATUS_KEY, undefined);
-		footerStatusPublished = false;
-		publishedFooterStatus = undefined;
+		if (closed) return;
+		const hadFooter = footerStatusPublished;
+		closed = true;
+		resetSession();
+		if (hadFooter && ctx.mode === "tui") ctx.ui.setStatus(FOOTER_STATUS_KEY, undefined);
 	});
 
 	pi.registerCommand("codex-usage", {
 		description: "Show current ChatGPT Codex usage windows",
 		handler: async (_args, ctx) => {
+			if (closed) return;
+			if (!ctx.hasUI) throw new UsageError("/codex-usage requires TUI or RPC mode; no usage request was made.");
+			const scope = generation;
 			try {
 				const snapshot = await refresh(ctx);
+				if (closed || generation !== scope) return;
 				ctx.ui.notify(formatUsage(snapshot.usage, snapshot.provider), "info");
 			} catch (error) {
+				if (closed || generation !== scope || error instanceof RefreshCancelled) return;
 				const message = error instanceof UsageError ? error.message : "Could not refresh Codex usage.";
 				ctx.ui.notify(`pi-codex-usage: ${message}`, "error");
 			}

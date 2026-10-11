@@ -5,7 +5,8 @@ Small Pi extension that shows the current ChatGPT-backed Codex usage windows.
 ## Footer status
 
 In TUI mode, the extension fetches usage at session startup, after the agent
-settles, and every five minutes while idle. It publishes a compact status such
+settles, when the model changes, and every five minutes while idle. It publishes
+a compact status such
 as:
 
 ```text
@@ -21,12 +22,17 @@ beside a healthy-looking window. Percentages must be nonnegative; window lengths
 must be positive whole seconds. Usage above 100% is displayed, not clamped.
 
 Background refresh failures do not show repeated notifications. A recent
-successful value is retained unchanged for 15 minutes, then marked stale with
+successful value is retained for 15 minutes, then marked stale with
 `?` (for example `C W5%?`). After one hour without a successful refresh, or when
 no successful value exists, the footer shows `C ?`. A later successful refresh
-restores the normal value automatically. `/codex-usage` always reports the
-request or response error category without including raw response bodies or
-credential-refresh details.
+restores the normal value automatically. Aging and theme styling are checked
+once per second, even while the agent is busy; this does not make extra network
+requests. Changing provider preference or detecting a different OAuth account
+clears the old value rather than presenting another account's usage.
+
+`/codex-usage` reports request or response error categories without including raw
+response bodies or credential-refresh details. Shutdown and session replacement
+cancel pending work and suppress late notifications.
 
 For first-line placement, install and enable
 [`pi-footer-compositor`](https://github.com/7h145/pi-footer-compositor).
@@ -38,6 +44,10 @@ Pi displays the compact value on its ordinary extension-status line.
 ```text
 /codex-usage
 ```
+
+Available in TUI and RPC modes. Print and JSON modes report an unsupported-mode
+error before resolving credentials or fetching usage; notifications would be
+invisible there. RPC uses notifications only, without polling or footer status.
 
 Example output:
 
