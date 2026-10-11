@@ -46,6 +46,7 @@ interface UsageSnapshot {
 	usage: UsageResponse;
 	provider: UsageProvider;
 	accountKey: string;
+	fallbackReason?: string;
 }
 
 class UsageError extends Error {}
@@ -171,9 +172,13 @@ function withAbort<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
 
 async function resolveChatGPTAuth(registry: ExtensionContext["modelRegistry"], preferred: UsageProvider, signal: AbortSignal) {
 	const providers: UsageProvider[] = preferred === "openai" ? ["openai", "openai-codex"] : ["openai-codex", "openai"];
+	let fallbackReason: string | undefined;
 	for (const provider of providers) {
 		signal.throwIfAborted();
-		if (!registry.getProvider(provider)) continue;
+		if (!registry.getProvider(provider)) {
+			if (provider === preferred) fallbackReason = `${provider} is unavailable in Pi`;
+			continue;
+		}
 		let auth;
 		try {
 			auth = await withAbort(registry.getProviderAuth(provider), signal);
@@ -182,7 +187,12 @@ async function resolveChatGPTAuth(registry: ExtensionContext["modelRegistry"], p
 			throw new UsageError(`Pi could not resolve ${provider} credentials. Run /login again.`);
 		}
 		// Ordinary OpenAI API keys cannot query ChatGPT subscription usage.
-		if (auth?.source !== "OAuth") continue;
+		if (auth?.source !== "OAuth") {
+			if (provider === preferred) fallbackReason = auth
+				? `${provider} did not resolve to ChatGPT OAuth (it may be using an API key)`
+				: `${provider} has no resolved login`;
+			continue;
+		}
 		const token = auth.auth.apiKey;
 		if (!token) throw new UsageError(`Pi did not provide a ChatGPT access token for ${provider}.`);
 		const accountId = extractAccountId(token, provider);
@@ -192,7 +202,7 @@ async function resolveChatGPTAuth(registry: ExtensionContext["modelRegistry"], p
 		const accountKey = accountId === undefined
 			? `token:${createHash("sha256").update(token).digest("hex")}`
 			: `account:${accountId}`;
-		return { provider, token, accountId, accountKey };
+		return { provider, token, accountId, accountKey, fallbackReason };
 	}
 	throw new UsageError("No ChatGPT OAuth login is available. Run /login and choose OpenAI → Sign in with ChatGPT, or OpenAI Codex (legacy).");
 }
@@ -209,7 +219,7 @@ async function fetchUsage(
 	const timeout = setTimeout(() => deadline.abort(), REQUEST_TIMEOUT_MS);
 	timeout.unref();
 	try {
-		const { provider, token, accountId, accountKey } = await resolveChatGPTAuth(registry, preferred, requestSignal);
+		const { provider, token, accountId, accountKey, fallbackReason } = await resolveChatGPTAuth(registry, preferred, requestSignal);
 		requestSignal.throwIfAborted();
 		onAccount(provider, accountKey);
 		const response = await withAbort(fetch(USAGE_URL, {
@@ -227,7 +237,7 @@ async function fetchUsage(
 			void response.body?.cancel().catch(() => {});
 			if (response.status === 401 || response.status === 403) {
 				if (provider === "openai") {
-					throw new UsageError(`The Codex usage endpoint rejected the openai ChatGPT OAuth token (HTTP ${response.status}). This does not mean your model login failed. Check subscription usage at https://chatgpt.com/settings/usage. No legacy credentials were tried.`);
+					throw new UsageError(`The Codex usage endpoint rejected the openai ChatGPT OAuth token (HTTP ${response.status}). This does not mean your model login failed. Check subscription usage at https://chatgpt.com/settings/usage. No legacy usage request was made.`);
 				}
 				throw new UsageError(`ChatGPT rejected the ${provider} credentials (HTTP ${response.status}). Run /login again.`);
 			}
@@ -241,7 +251,7 @@ async function fetchUsage(
 			if (requestSignal.aborted) throw requestSignal.reason;
 			throw new UsageError("The ChatGPT usage response was not valid JSON.");
 		}
-		return { usage: parseUsage(payload), provider, accountKey };
+		return { usage: parseUsage(payload), provider, accountKey, fallbackReason };
 	} catch (error) {
 		if (signal.aborted) throw new RefreshCancelled("Codex usage refresh cancelled.");
 		if (deadline.signal.aborted) throw new UsageError("Codex usage refresh timed out after 15 seconds.");
@@ -255,14 +265,18 @@ function getWindows(usage: UsageResponse): UsageWindow[] {
 	return [usage.rate_limit?.primary_window, usage.rate_limit?.secondary_window].filter(assertWindow);
 }
 
-function formatUsage(usage: UsageResponse, provider: UsageProvider): string {
+function formatUsage(snapshot: UsageSnapshot): string {
+	const { usage, provider, fallbackReason } = snapshot;
 	const windows = getWindows(usage);
 	if (windows.length === 0) {
 		throw new UsageError("The ChatGPT usage response did not contain any Codex usage windows.");
 	}
 
 	const plan = usage.plan_type ? ` (${usage.plan_type})` : "";
-	return [`Codex usage${plan}`, `Provider: ${provider}`, ...windows.map(formatWindow)].join("\n");
+	const note = fallbackReason
+		? [`Note: Using ${provider} usage credentials because ${fallbackReason}. Switching models does not migrate logins. Codex quota is not proof of the selected model's remaining budget.`]
+		: [];
+	return [`Codex usage${plan}`, `Provider: ${provider}`, ...note, ...windows.map(formatWindow)].join("\n");
 }
 
 function compactWindow(window: UsageWindow): string {
@@ -272,12 +286,13 @@ function compactWindow(window: UsageWindow): string {
 	return `${windowName(window.limit_window_seconds)}${used}%`;
 }
 
-function renderFooterStatus(ctx: ExtensionContext, usage: UsageResponse, stale = false): string | undefined {
+function renderFooterStatus(ctx: ExtensionContext, snapshot: UsageSnapshot, stale = false): string | undefined {
 	if (ctx.mode !== "tui") return undefined;
-	const windows = getWindows(usage);
+	const windows = getWindows(snapshot.usage);
 	if (windows.length === 0) return undefined;
 
-	const text = `C ${windows.map(compactWindow).join(" ")}${stale ? "?" : ""}`;
+	const source = snapshot.fallbackReason ? ` [${snapshot.provider === "openai-codex" ? "legacy" : "openai"}]` : "";
+	const text = `C ${windows.map(compactWindow).join(" ")}${stale ? "?" : ""}${source}`;
 	const highestUsage = Math.max(...windows.map((window) => window.used_percent));
 	return highestUsage > 90
 		? ctx.ui.theme.fg("error", text)
@@ -325,7 +340,7 @@ export default function (pi: ExtensionAPI) {
 		const age = Date.now() - latestUsageAt;
 		const value = !latestUsage || age >= UNKNOWN_AFTER_MS
 			? renderUnknownFooterStatus(ctx)
-			: renderFooterStatus(ctx, latestUsage.usage, age >= STALE_AFTER_MS);
+			: renderFooterStatus(ctx, latestUsage, age >= STALE_AFTER_MS);
 		// Rebuild styling from the current theme, including during outages and
 		// busy agent turns. Only changed output causes a UI update.
 		publishFooterStatus(ctx, value);
@@ -432,7 +447,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const snapshot = await refresh(ctx);
 				if (closed || generation !== scope) return;
-				ctx.ui.notify(formatUsage(snapshot.usage, snapshot.provider), "info");
+				ctx.ui.notify(formatUsage(snapshot), "info");
 			} catch (error) {
 				if (closed || generation !== scope || error instanceof RefreshCancelled) return;
 				const message = error instanceof UsageError ? error.message : "Could not refresh Codex usage.";

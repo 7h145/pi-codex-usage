@@ -70,7 +70,10 @@ The selected model's OpenAI provider takes precedence. For other models,
 is skipped in favor of the other provider. API keys are never sent to the
 ChatGPT usage endpoint. Credential resolution errors, malformed OAuth tokens
 and backend rejection are reported without silently switching to another
-account. The command identifies which provider supplied the credentials.
+account. The command's `Provider` line identifies the usage credential provider,
+not necessarily the selected model provider. A fallback adds a note explaining
+why the preferred login was skipped. The footer marks fallback credentials with
+`[legacy]` or `[openai]`, for example `C W2% [legacy]`.
 
 The two providers have separate logins; switching models does not migrate
 credentials. Newer `openai` OAuth tokens need not contain a Codex account ID.
