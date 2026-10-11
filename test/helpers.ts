@@ -68,6 +68,7 @@ export function fixture(t: TestContext, mode: "tui" | "rpc" | "print" | "json" =
 		id === "openai-codex" ? oauth() : undefined;
 	let fetchResponse: (init: RequestInit) => Promise<Response> = async () => response();
 	const registry = {
+		getProvider: (id: string) => ({ id }),
 		getProviderAuth: async (id: string) => { authCalls.push(id); return resolveAuth(id); },
 		getApiKeyForProvider: async (id: string) => {
 			authCalls.push(id);

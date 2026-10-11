@@ -39,22 +39,41 @@ Example output:
 
 ```text
 Codex usage (plus)
+Provider: openai
 5h: 23% used, resets in 2h 14m
 Week: 48% used, resets in 4d 7h
 ```
 
 ## Authentication
 
-The extension reuses Pi's existing OpenAI Codex OAuth login. If needed, run
-`/login` and select **OpenAI Codex**. The access token is obtained through Pi's
-model registry on each refresh and is never stored or logged by the extension.
+Requires Pi 1.0.2 or newer. The extension reuses ChatGPT OAuth through Pi's
+model registry; it does not read credential files or store or log tokens.
+
+- **`openai`:** run `/login`, choose **OpenAI**, then **Sign in with ChatGPT**.
+- **`openai-codex`:** the existing **OpenAI Codex (legacy)** login also works.
+
+The selected model's OpenAI provider takes precedence. For other models,
+`openai` is tried first. An unavailable provider, missing login or API-key login
+is skipped in favor of the other provider. API keys are never sent to the
+ChatGPT usage endpoint. Credential resolution errors, malformed OAuth tokens
+and backend rejection are reported without silently switching to another
+account. The command identifies which provider supplied the credentials.
+
+Both credential paths are implemented, but acceptance of newer `openai` tokens
+by the undocumented endpoint has not been confirmed live. A working model login
+does not guarantee access to this endpoint. The extension shows its top-level
+Codex quota windows, not OpenAI Platform API billing or every model-specific
+limit.
 
 ## Important caveat
 
 This extension calls the undocumented ChatGPT backend endpoint
 `https://chatgpt.com/backend-api/wham/usage`. It is not part of the public
-OpenAI Platform API and may change or disappear without notice. Requests time
-out after 15 seconds. OAuth tokens and response bodies are not logged.
+OpenAI Platform API and may change or disappear without notice. The complete
+refresh has a 15-second deadline, including credential resolution and response
+parsing. Pi may finish an OAuth refresh after the extension stops waiting; late
+results do not start a usage request. HTTP redirects are refused. OAuth tokens
+and response bodies are not logged.
 
 ## Installation
 

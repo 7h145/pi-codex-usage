@@ -3,7 +3,7 @@
  * Purpose: show current ChatGPT-backed Codex usage windows through
  * `/codex-usage` and publish a compact value for pi-footer-compositor.
  *
- * Strategy: reuse Pi's OpenAI Codex OAuth access token to query the
+ * Strategy: reuse Pi's ChatGPT OAuth access token to query the
  * undocumented ChatGPT `/wham/usage` endpoint. Refresh at TUI startup, after
  * the agent settles, and periodically while idle. Validate responses before
  * publishing and degrade stale values to `?` when refreshes keep failing.
@@ -40,22 +40,37 @@ interface UsageResponse {
 	} | null;
 }
 
-function extractAccountId(token: string): string {
+type UsageProvider = "openai" | "openai-codex";
+interface UsageSnapshot {
+	usage: UsageResponse;
+	provider: UsageProvider;
+	accountId: string;
+}
+
+class UsageError extends Error {}
+class RefreshCancelled extends Error {}
+
+function preferredProvider(ctx: ExtensionContext): UsageProvider {
+	return ctx.model?.provider === "openai-codex" ? "openai-codex" : "openai";
+}
+
+function extractAccountId(token: string, provider: UsageProvider): string {
 	const parts = token.split(".");
 	if (parts.length !== 3) {
-		throw new Error("OpenAI Codex is not using ChatGPT OAuth. Run /login and select OpenAI Codex.");
+		throw new UsageError(`The ${provider} credential is not a ChatGPT OAuth token. Run /login again.`);
 	}
 
 	let payload: unknown;
 	try {
 		payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
 	} catch {
-		throw new Error("Could not decode the OpenAI Codex OAuth token.");
+		throw new UsageError(`Could not decode the ${provider} ChatGPT OAuth token.`);
 	}
 
-	const accountId = (payload as Record<string, any>)?.[AUTH_CLAIM]?.chatgpt_account_id;
-	if (typeof accountId !== "string" || !accountId) {
-		throw new Error("The OpenAI Codex OAuth token does not contain a ChatGPT account ID.");
+	const claim = payload && typeof payload === "object" ? (payload as Record<string, unknown>)[AUTH_CLAIM] : undefined;
+	const accountId = claim && typeof claim === "object" ? (claim as Record<string, unknown>).chatgpt_account_id : undefined;
+	if (typeof accountId !== "string" || !accountId || /[^\x21-\x7e]/.test(accountId)) {
+		throw new UsageError(`The ${provider} OAuth token does not contain a usable ChatGPT account ID.`);
 	}
 	return accountId;
 }
@@ -101,55 +116,97 @@ function formatWindow(window: UsageWindow): string {
 	return `${windowName(window.limit_window_seconds)}: ${used}% used, resets ${relativeReset(window.reset_at)}`;
 }
 
-async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<UsageResponse> {
-	const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
-	if (!token) {
-		throw new Error("OpenAI Codex is not logged in. Run /login and select OpenAI Codex.");
-	}
-
-	const accountId = extractAccountId(token);
-	const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-	const response = await fetch(USAGE_URL, {
-		signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
-		headers: {
-			Authorization: `Bearer ${token}`,
-			"ChatGPT-Account-Id": accountId,
-			Accept: "application/json",
-			Originator: "pi-codex-usage",
-		},
+// Observe late resolution/rejection even when cancellation wins. Pi owns OAuth
+// refresh; we stop waiting without interfering with its credential rotation.
+function withAbort<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
+	return new Promise((resolve, reject) => {
+		const abort = () => reject(signal.reason);
+		if (signal.aborted) abort();
+		else signal.addEventListener("abort", abort, { once: true });
+		task.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
 	});
+}
 
-	if (!response.ok) {
-		if (response.status === 401 || response.status === 403) {
-			throw new Error(`ChatGPT rejected the Codex credentials (HTTP ${response.status}).`);
+async function resolveChatGPTAuth(registry: ExtensionContext["modelRegistry"], preferred: UsageProvider, signal: AbortSignal) {
+	const providers: UsageProvider[] = preferred === "openai" ? ["openai", "openai-codex"] : ["openai-codex", "openai"];
+	for (const provider of providers) {
+		signal.throwIfAborted();
+		if (!registry.getProvider(provider)) continue;
+		let auth;
+		try {
+			auth = await withAbort(registry.getProviderAuth(provider), signal);
+		} catch {
+			if (signal.aborted) throw signal.reason;
+			throw new UsageError(`Pi could not resolve ${provider} credentials. Run /login again.`);
 		}
-		throw new Error(`ChatGPT usage request failed (HTTP ${response.status}).`);
+		// Ordinary OpenAI API keys cannot query ChatGPT subscription usage.
+		if (auth?.source !== "OAuth") continue;
+		const token = auth.auth.apiKey;
+		if (!token) throw new UsageError(`Pi did not provide a ChatGPT access token for ${provider}.`);
+		return { provider, token, accountId: extractAccountId(token, provider) };
 	}
+	throw new UsageError("No ChatGPT OAuth login is available. Run /login and choose OpenAI → Sign in with ChatGPT, or OpenAI Codex (legacy).");
+}
 
-	const payload: unknown = await response.json();
-	if (!payload || typeof payload !== "object") {
-		throw new Error("The ChatGPT usage response has an unexpected format.");
-	}
+async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<UsageSnapshot> {
+	const registry = ctx.modelRegistry;
+	const preferred = preferredProvider(ctx);
+	const deadline = new AbortController();
+	const requestSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+	const timeout = setTimeout(() => deadline.abort(), REQUEST_TIMEOUT_MS);
+	timeout.unref();
+	try {
+		const { provider, token, accountId } = await resolveChatGPTAuth(registry, preferred, requestSignal);
+		requestSignal.throwIfAborted();
+		const response = await withAbort(fetch(USAGE_URL, {
+			signal: requestSignal,
+			redirect: "error",
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"ChatGPT-Account-Id": accountId,
+				Accept: "application/json",
+				Originator: "pi-codex-usage",
+			},
+		}), requestSignal);
 
-	const usage = payload as UsageResponse;
-	if (getWindows(usage).length === 0) {
-		throw new Error("The ChatGPT usage response did not contain any Codex usage windows.");
+		if (!response.ok) {
+			if (response.status === 401 || response.status === 403) {
+				throw new UsageError(`ChatGPT rejected the ${provider} credentials (HTTP ${response.status}). Run /login again.`);
+			}
+			throw new UsageError(`ChatGPT usage request failed (HTTP ${response.status}).`);
+		}
+
+		const payload: unknown = await withAbort(response.json(), requestSignal);
+		if (!payload || typeof payload !== "object") {
+			throw new UsageError("The ChatGPT usage response has an unexpected format.");
+		}
+
+		const usage = payload as UsageResponse;
+		if (getWindows(usage).length === 0) {
+			throw new UsageError("The ChatGPT usage response did not contain any Codex usage windows.");
+		}
+		return { usage, provider, accountId };
+	} catch (error) {
+		if (signal?.aborted) throw new RefreshCancelled("Codex usage refresh cancelled.");
+		if (deadline.signal.aborted) throw new UsageError("Codex usage refresh timed out after 15 seconds.");
+		throw error;
+	} finally {
+		clearTimeout(timeout);
 	}
-	return usage;
 }
 
 function getWindows(usage: UsageResponse): UsageWindow[] {
 	return [usage.rate_limit?.primary_window, usage.rate_limit?.secondary_window].filter(assertWindow);
 }
 
-function formatUsage(usage: UsageResponse): string {
+function formatUsage(usage: UsageResponse, provider: UsageProvider): string {
 	const windows = getWindows(usage);
 	if (windows.length === 0) {
 		throw new Error("The ChatGPT usage response did not contain any Codex usage windows.");
 	}
 
 	const plan = usage.plan_type ? ` (${usage.plan_type})` : "";
-	return [`Codex usage${plan}`, ...windows.map(formatWindow)].join("\n");
+	return [`Codex usage${plan}`, `Provider: ${provider}`, ...windows.map(formatWindow)].join("\n");
 }
 
 function compactWindow(window: UsageWindow): string {
@@ -182,8 +239,8 @@ export default function (pi: ExtensionAPI) {
 	let latestCtx: ExtensionContext | undefined;
 	let refreshTimer: ReturnType<typeof setInterval> | undefined;
 	let requestController: AbortController | undefined;
-	let refreshInFlight: Promise<UsageResponse> | undefined;
-	let latestUsage: UsageResponse | undefined;
+	let refreshInFlight: Promise<UsageSnapshot> | undefined;
+	let latestUsage: UsageSnapshot | undefined;
 	let latestUsageAt = 0;
 	let footerStatusPublished = false;
 	let publishedFooterStatus: string | undefined;
@@ -205,11 +262,11 @@ export default function (pi: ExtensionAPI) {
 
 		const age = Date.now() - latestUsageAt;
 		if (age >= UNKNOWN_AFTER_MS) publishFooterStatus(ctx, renderUnknownFooterStatus(ctx));
-		else if (age >= STALE_AFTER_MS) publishFooterStatus(ctx, renderFooterStatus(ctx, latestUsage, true));
+		else if (age >= STALE_AFTER_MS) publishFooterStatus(ctx, renderFooterStatus(ctx, latestUsage.usage, true));
 		// For short outages, leave the recent successful value unchanged.
 	}
 
-	async function refresh(ctx: ExtensionContext): Promise<UsageResponse> {
+	async function refresh(ctx: ExtensionContext): Promise<UsageSnapshot> {
 		latestCtx = ctx;
 		if (refreshInFlight) return refreshInFlight;
 
@@ -220,7 +277,7 @@ export default function (pi: ExtensionAPI) {
 			const usage = await task;
 			latestUsage = usage;
 			latestUsageAt = Date.now();
-			if (sessionActive) publishFooterStatus(ctx, renderFooterStatus(ctx, usage));
+			if (sessionActive) publishFooterStatus(ctx, renderFooterStatus(ctx, usage.usage));
 			return usage;
 		} catch (error) {
 			publishRefreshFailure(ctx);
@@ -273,7 +330,8 @@ export default function (pi: ExtensionAPI) {
 		description: "Show current ChatGPT Codex usage windows",
 		handler: async (_args, ctx) => {
 			try {
-				ctx.ui.notify(formatUsage(await refresh(ctx)), "info");
+				const snapshot = await refresh(ctx);
+				ctx.ui.notify(formatUsage(snapshot.usage, snapshot.provider), "info");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`pi-codex-usage: ${message}`, "error");
