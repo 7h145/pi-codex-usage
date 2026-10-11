@@ -28,7 +28,6 @@ const FOOTER_STATUS_KEY = "footer-compositor:right:20:codex-usage";
 interface UsageWindow {
 	used_percent: number;
 	limit_window_seconds: number;
-	reset_after_seconds?: number;
 	reset_at: number;
 }
 
@@ -80,12 +79,50 @@ function assertWindow(value: unknown): value is UsageWindow {
 	const window = value as Partial<UsageWindow>;
 	return (
 		typeof window.used_percent === "number" &&
-		Number.isFinite(window.used_percent) &&
+		Number.isFinite(window.used_percent * 10) &&
+		window.used_percent >= 0 &&
 		typeof window.limit_window_seconds === "number" &&
-		Number.isFinite(window.limit_window_seconds) &&
+		Number.isSafeInteger(window.limit_window_seconds) &&
+		window.limit_window_seconds > 0 &&
 		typeof window.reset_at === "number" &&
-		Number.isFinite(window.reset_at)
+		Number.isSafeInteger(window.reset_at) &&
+		window.reset_at >= 0
 	);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseUsage(payload: unknown): UsageResponse {
+	if (!isRecord(payload) || (payload.plan_type != null &&
+		(typeof payload.plan_type !== "string" || payload.plan_type.length > 80 || /[\x00-\x1f\x7f]/.test(payload.plan_type)))) {
+		throw new UsageError("The ChatGPT usage response has an unexpected format.");
+	}
+	if (payload.rate_limit == null) {
+		throw new UsageError("The ChatGPT usage response did not contain any Codex usage windows.");
+	}
+	if (!isRecord(payload.rate_limit)) {
+		throw new UsageError("The ChatGPT usage response has an unexpected format.");
+	}
+	const windows: UsageResponse["rate_limit"] = {};
+	for (const key of ["primary_window", "secondary_window"] as const) {
+		const value = payload.rate_limit[key];
+		if (value == null) continue;
+		// Reject the response rather than making a broken high-usage window
+		// disappear beside a healthy-looking valid window.
+		if (!assertWindow(value)) throw new UsageError(`The ChatGPT usage response contains an invalid ${key}.`);
+		windows[key] = {
+			used_percent: value.used_percent,
+			limit_window_seconds: value.limit_window_seconds,
+			reset_at: value.reset_at,
+		};
+	}
+	const usage: UsageResponse = { plan_type: typeof payload.plan_type === "string" ? payload.plan_type : undefined, rate_limit: windows };
+	if (getWindows(usage).length === 0) {
+		throw new UsageError("The ChatGPT usage response did not contain any Codex usage windows.");
+	}
+	return usage;
 }
 
 function windowName(windowSeconds: number): string {
@@ -170,26 +207,25 @@ async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<
 		}), requestSignal);
 
 		if (!response.ok) {
+			void response.body?.cancel().catch(() => {});
 			if (response.status === 401 || response.status === 403) {
 				throw new UsageError(`ChatGPT rejected the ${provider} credentials (HTTP ${response.status}). Run /login again.`);
 			}
 			throw new UsageError(`ChatGPT usage request failed (HTTP ${response.status}).`);
 		}
 
-		const payload: unknown = await withAbort(response.json(), requestSignal);
-		if (!payload || typeof payload !== "object") {
-			throw new UsageError("The ChatGPT usage response has an unexpected format.");
+		let payload: unknown;
+		try {
+			payload = await withAbort(response.json(), requestSignal);
+		} catch {
+			if (requestSignal.aborted) throw requestSignal.reason;
+			throw new UsageError("The ChatGPT usage response was not valid JSON.");
 		}
-
-		const usage = payload as UsageResponse;
-		if (getWindows(usage).length === 0) {
-			throw new UsageError("The ChatGPT usage response did not contain any Codex usage windows.");
-		}
-		return { usage, provider, accountId };
+		return { usage: parseUsage(payload), provider, accountId };
 	} catch (error) {
 		if (signal?.aborted) throw new RefreshCancelled("Codex usage refresh cancelled.");
 		if (deadline.signal.aborted) throw new UsageError("Codex usage refresh timed out after 15 seconds.");
-		throw error;
+		throw error instanceof UsageError ? error : new UsageError("Could not reach the ChatGPT usage endpoint.");
 	} finally {
 		clearTimeout(timeout);
 	}
@@ -202,7 +238,7 @@ function getWindows(usage: UsageResponse): UsageWindow[] {
 function formatUsage(usage: UsageResponse, provider: UsageProvider): string {
 	const windows = getWindows(usage);
 	if (windows.length === 0) {
-		throw new Error("The ChatGPT usage response did not contain any Codex usage windows.");
+		throw new UsageError("The ChatGPT usage response did not contain any Codex usage windows.");
 	}
 
 	const plan = usage.plan_type ? ` (${usage.plan_type})` : "";
@@ -333,7 +369,7 @@ export default function (pi: ExtensionAPI) {
 				const snapshot = await refresh(ctx);
 				ctx.ui.notify(formatUsage(snapshot.usage, snapshot.provider), "info");
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
+				const message = error instanceof UsageError ? error.message : "Could not refresh Codex usage.";
 				ctx.ui.notify(`pi-codex-usage: ${message}`, "error");
 			}
 		},

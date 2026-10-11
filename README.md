@@ -16,13 +16,17 @@ C 5h37% W2%
 The percentages are usage consumed. The status uses Pi's warning theme above
 70% and error theme above 90%. Only active windows returned by OpenAI are shown;
 if a 5-hour window is absent, the compact status contains only the weekly one.
+A malformed present window rejects the whole response rather than disappearing
+beside a healthy-looking window. Percentages must be nonnegative; window lengths
+must be positive whole seconds. Usage above 100% is displayed, not clamped.
 
 Background refresh failures do not show repeated notifications. A recent
 successful value is retained unchanged for 15 minutes, then marked stale with
 `?` (for example `C W5%?`). After one hour without a successful refresh, or when
 no successful value exists, the footer shows `C ?`. A later successful refresh
 restores the normal value automatically. `/codex-usage` always reports the
-specific request or response error.
+request or response error category without including raw response bodies or
+credential-refresh details.
 
 For first-line placement, install and enable
 [`pi-footer-compositor`](https://github.com/7h145/pi-footer-compositor).
