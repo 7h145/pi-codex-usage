@@ -6,8 +6,7 @@ Small Pi extension that shows the current ChatGPT-backed Codex usage windows.
 
 In TUI mode, the extension fetches usage at session startup, after the agent
 settles, when the model changes, and every five minutes while idle. It publishes
-a compact status such
-as:
+a compact status such as:
 
 ```text
 C W2%
@@ -64,7 +63,7 @@ Requires Pi 1.0.2 or newer. The extension reuses ChatGPT OAuth through Pi's
 model registry; it does not read credential files or store or log tokens.
 
 - **`openai`:** run `/login`, choose **OpenAI**, then **Sign in with ChatGPT**.
-- **`openai-codex`:** the existing **OpenAI Codex (legacy)** login also works.
+- **`openai-codex`:** the existing **OpenAI Codex (legacy)** login is also supported.
 
 The selected model's OpenAI provider takes precedence. For other models,
 `openai` is tried first. An unavailable provider, missing login or API-key login
@@ -134,3 +133,32 @@ If you also install the compositor separately, turn off its
 
 See Pi's [resource settings reference](https://pi.dev/docs/latest/settings#resources)
 for configuration details.
+
+## Development
+
+Use Node.js 24 or newer:
+
+```bash
+npm ci
+npm run check
+```
+
+`check` runs TypeScript checking and Node's regression tests. The tests use
+synthetic OAuth credentials, a fake clock and mocked HTTP; they do not read
+credential files or call ChatGPT. They cover both providers, validation, shared
+refreshes, cancellation, session replacement, cache aging, themes and mode guards.
+CI runs the checks on Node.js 24 with Pi SDKs 1.0.2 and 1.1.0.
+
+## Last confirmed working
+
+| Date | Code revision | Pi | Node.js | Platform |
+|---|---|---|---|---|
+| 2026-10-11 | `7451133` | `1.1.0` | `26.10.0` | Linux x64 |
+
+**Checked:** 65 automated regression tests and type checking; isolated scripted
+regular/fullscreen TUI with the compositor (status, command, thresholds, theme
+changes, sanitized errors, reload and exit), RPC notifications and print/JSON
+mode guards. Authentication and HTTP were synthetic/mocked; no live account or
+backend-token acceptance was checked.
+
+One known-working configuration, not a supported-version range.
