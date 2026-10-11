@@ -168,12 +168,14 @@ CI runs the checks on Node.js 24 with Pi SDKs 1.0.2 and 1.1.0.
 
 | Date | Code revision | Pi | Node.js | Platform |
 |---|---|---|---|---|
-| 2026-10-11 | `7451133` | `1.1.0` | `26.10.0` | Linux x64 |
+| 2026-10-11 | `dff3545` | `1.1.0` | `26.10.0` | Linux x64 |
 
-**Checked:** 65 automated regression tests and type checking; isolated scripted
-regular/fullscreen TUI with the compositor (status, command, thresholds, theme
-changes, sanitized errors, reload and exit), RPC notifications and print/JSON
-mode guards. Authentication and HTTP were synthetic/mocked; no live account or
-backend-token acceptance was checked.
+**Checked:** 77 automated regression tests and type checking; isolated scripted
+regular/fullscreen TUI with the compositor (metadata-free OAuth handling,
+fallback labels, status, command, thresholds, theme changes, sanitized errors,
+reload and exit), RPC notifications and print/JSON mode guards. Automated and
+scripted checks used synthetic credentials and mocked HTTP. A separate live
+request with newer `openai` OAuth returned HTTP 401, not usage data; see the
+[authentication limitation](#authentication).
 
 One known-working configuration, not a supported-version range.
